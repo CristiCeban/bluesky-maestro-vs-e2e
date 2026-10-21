@@ -1,0 +1,41 @@
+name: Setup
+description: >
+  Node 24 + pnpm 11.28.5 (the repo's devEngines), the workspace install, the
+  e2e env files (as upstream's nightly) and the compiled translations.
+inputs:
+  dev-env:
+    description: Also install dev-env (the mock backend)
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - uses: pnpm/action-setup@v4
+      with:
+        version: 11.28.5
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '24.19.0'
+        cache: pnpm
+
+    - name: Install dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile
+
+    - name: Install dev-env dependencies
+      if: inputs.dev-env == 'true'
+      shell: bash
+      run: pnpm --dir dev-env install --frozen-lockfile
+
+    # Upstream's nightly: Expo loads standard env filenames, so the E2E
+    # overrides go in .env.development.
+    - name: Prepare the E2E configuration
+      shell: bash
+      run: |
+        cp .env.example .env
+        cp .env.e2e .env.development
+        cp google-services.json.example google-services.json
+
+    - name: Compile translations
+      shell: bash
+      run: pnpm intl:build > i18n.log 2>&1 || (cat i18n.log; exit 1)

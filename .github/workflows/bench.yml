@@ -1,0 +1,214 @@
+name: Bench (Maestro vs e2e)
+
+# Runs Bluesky's 19 stable flows with Maestro (__e2e__/flows, unmodified) and
+# with e2e (tests/**/*.e2e.ts) on GitHub-hosted runners: Android on
+# ubuntu-latest (API 34 emulator, KVM), iOS on macos-26 (iPhone 17 simulator).
+# Each run is its own job on a fresh runner, with the same prebuilt
+# development client (run "Build apps" first), the same dev-env backend and
+# the same Metro on 8081, started before the timed suite. The summarize job
+# writes the per-platform, per-arm table to the run summary and uploads
+# bench.csv.
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Runs per arm and platform (one fresh runner each)
+        default: '5'
+      platforms:
+        description: Comma-separated platforms
+        default: 'android,ios'
+      arms:
+        description: Comma-separated arms
+        default: 'maestro,e2e'
+      xcode:
+        description: Xcode version (the one the app was built with)
+        default: '26.4'
+
+permissions:
+  contents: read
+
+env:
+  CI: '1'
+  # Upstream's nightly Maestro pin and env.
+  MAESTRO_VERSION: '2.10.0'
+  MAESTRO_DRIVER_STARTUP_TIMEOUT: '180000'
+  MAESTRO_CLI_NO_ANALYTICS: '1'
+  MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED: 'true'
+  MAESTRO_DISABLE_UPDATE_CHECK: '1'
+  EXPO_NO_TELEMETRY: '1'
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - id: matrix
+        env:
+          RUNS: ${{ inputs.runs }}
+          PLATFORMS: ${{ inputs.platforms }}
+          ARMS: ${{ inputs.arms }}
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'EOF'
+          import json, os
+          split = lambda v: [x.strip() for x in os.environ[v].split(',') if x.strip()]
+          runs = int(os.environ['RUNS'])
+          # Interleave the arms so both see the same runner conditions.
+          include = [{'platform': p, 'arm': a, 'run': r}
+                     for r in range(1, runs + 1) for p in split('PLATFORMS') for a in split('ARMS')]
+          print('matrix=' + json.dumps({'include': include}))
+          EOF
+
+  bench:
+    needs: plan
+    name: bench ${{ matrix.platform }} ${{ matrix.arm }} ${{ matrix.run }}
+    runs-on: ${{ matrix.platform == 'ios' && 'macos-26' || 'ubuntu-latest' }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      ARM: ${{ matrix.arm }}
+      RUN: ${{ matrix.run }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Select Xcode
+        if: matrix.platform == 'ios'
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ inputs.xcode }}
+
+      # Both arms need the workspace: Metro serves the app's JS to both.
+      - name: Setup
+        uses: ./.github/bench/setup
+        with:
+          dev-env: 'true'
+
+      - name: Download the prebuilt app
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$PLATFORM" = ios ]; then
+            gh release download bench-apps --dir app --pattern 'Bluesky.app.zip*'
+            (cd app && shasum -a 256 -c Bluesky.app.zip.sha256 && ditto -x -k Bluesky.app.zip .)
+          else
+            gh release download bench-apps --dir app --pattern 'bluesky-e2e.apk*'
+            (cd app && sha256sum -c bluesky-e2e.apk.sha256)
+          fi
+
+      - name: Set up Java 17
+        if: matrix.arm == 'maestro'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Upstream's nightly install, with its checksum.
+      - name: Install Maestro
+        if: matrix.arm == 'maestro'
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/maestro.zip" \
+            "https://github.com/mobile-dev-inc/Maestro/releases/download/cli-${MAESTRO_VERSION}/maestro.zip"
+          echo "29b675e10cc12080e445e9bfb2e2b4e4dfb9c0f2e30d5884120d258b5e1cd991  $RUNNER_TEMP/maestro.zip" \
+            | shasum -a 256 --check
+          unzip -q "$RUNNER_TEMP/maestro.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/maestro/bin" >> "$GITHUB_PATH"
+          test "$("$RUNNER_TEMP/maestro/bin/maestro" --version)" = "$MAESTRO_VERSION"
+
+      - name: Boot a simulator and install the app
+        if: matrix.platform == 'ios'
+        run: |
+          t=$(date +%s)
+          .github/bench/boot-ios.sh app/Bluesky.app
+          echo "boot_install_s=$(( $(date +%s) - t ))" >> out/steps.txt
+
+      - name: Start the backend and Metro
+        run: .github/bench/services.sh "$PLATFORM"
+
+      - name: Run the suite on iOS
+        if: matrix.platform == 'ios'
+        run: .github/bench/run-arm.sh
+
+      - name: Enable KVM
+        if: matrix.platform == 'android'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # Upstream's nightly emulator: API 34 google_apis x86_64, pixel_6 at
+      # 720x1600@280, 6 GB, 4 cores, heap 512 MB, SwiftShader GLES with Vulkan
+      # off. The device prep and the timed suite are in run-arm.sh.
+      - name: Run the suite on Android API 34
+        if: matrix.platform == 'android'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          cores: 4
+          ram-size: 6144M
+          heap-size: 512M
+          disable-animations: true
+          disable-spellchecker: true
+          emulator-options: -no-window -gpu swiftshader_indirect -feature -Vulkan -no-snapshot -noaudio -no-boot-anim -camera-back none
+          pre-emulator-launch-script: .github/bench/avd-config.sh
+          script: .github/bench/run-arm.sh
+
+      - name: Collect service logs
+        if: always()
+        run: |
+          mkdir -p out
+          if [ "$PLATFORM" = android ]; then
+            docker compose -f dev-env/dev-infra/docker-compose.yaml logs --no-color > out/docker-services.log 2>&1 || true
+          fi
+
+      # Maestro names its output folders after the flows, which contain
+      # characters (':') that upload-artifact rejects, so upload an archive.
+      - name: Archive the results
+        if: always()
+        run: tar -czf bench-out.tgz out || true
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.platform }}-${{ matrix.arm }}-${{ matrix.run }}
+          path: bench-out.tgz
+          if-no-files-found: ignore
+          retention-days: 30
+
+  summarize:
+    needs: bench
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Download the results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bench-*
+          path: results
+
+      - name: Summarize
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for f in results/*/bench-out.tgz; do
+            d=$(dirname "$f"); tar -xzf "$f" -C "$d"
+          done
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs" --paginate > jobs.json
+          python3 .github/bench/summarize.py results jobs.json bench.csv >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-summary
+          path: bench.csv
+          retention-days: 90
