@@ -90,21 +90,22 @@ jobs:
       - name: Prebuild
         run: pnpm exec expo prebuild --platform ios --clean --no-install
 
-      # The dev profile turns ccache on in the Podfile properties.
       - name: Install pods
-        run: |
-          brew install ccache || true
-          cd ios && LANG=en_US.UTF-8 pod install
+        run: cd ios && LANG=en_US.UTF-8 pod install
 
       - name: Build the Debug simulator development client
         run: |
           cd ios
-          set -o pipefail
           xcodebuild -workspace Bluesky.xcworkspace -scheme Bluesky \
             -configuration Debug -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath build ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
-            CODE_SIGNING_ALLOWED=NO build | tail -n 200
+            CODE_SIGNING_ALLOWED=NO build > ../xcodebuild.log 2>&1 || {
+              grep -nE 'error:|ld: |Undefined symbols|clang: error' ../xcodebuild.log | head -n 150
+              tail -n 60 ../xcodebuild.log
+              exit 1
+            }
+          tail -n 20 ../xcodebuild.log
 
       - name: Publish the app
         env:
