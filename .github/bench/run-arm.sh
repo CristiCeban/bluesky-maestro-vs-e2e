@@ -37,6 +37,19 @@ if [ "$PLATFORM" = android ]; then
   # Let the freshly booted emulator's background work (Play services) settle,
   # as the 10tap benchmark does.
   sleep 90
+  # Warm launch, as the 10tap benchmark does: the first cold start of the
+  # debug dev client on the SwiftShader emulator can take over a minute
+  # (smoke run 1: a blank screen for 60 s in e2e's first test). Both tools
+  # clear the app's state before each test, so this leaves nothing behind.
+  t=$(now)
+  adb -s "$DEVICE" shell monkey -p "$APP" -c android.intent.category.LAUNCHER 1 || true
+  sleep 20
+  # ...and load the app's bundle from Metro once.
+  adb -s "$DEVICE" shell am start -a android.intent.action.VIEW \
+    -d "exp+bluesky://expo-development-client/?url=http%3A%2F%2Flocalhost%3A8081" "$APP" || true
+  sleep 40
+  adb -s "$DEVICE" shell am force-stop "$APP"
+  echo "warm_launch_s=$(since "$t")" >> "$OUT/steps.txt"
   device="emulator api34 google_apis x86_64 pixel_6 720x1600@280"
   adb -s "$DEVICE" logcat -c || true
   adb -s "$DEVICE" logcat -v threadtime > "$OUT/logcat.log" 2>&1 &
@@ -74,7 +87,7 @@ case "$ARM" in
     env -u CI METRO_URL=http://localhost:8081 "${TIME[@]}" pnpm exec e2e run --target "$PLATFORM" --retries 0 \
       --reporter list,junit --output "$OUT/e2e" > "$OUT/stdout.log" 2>&1
     code=$?
-    ver() { node -p "require('$1/package.json').version" 2>/dev/null; }
+    ver() { node -p "JSON.parse(require('fs').readFileSync('node_modules/$1/package.json')).version" 2>/dev/null; }
     versions="e2e=$(ver e2e);@e2e-dev/mobile=$(ver @e2e-dev/mobile);agent-device=$(ver agent-device)"
     ;;
   *)
