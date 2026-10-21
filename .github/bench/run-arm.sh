@@ -23,6 +23,20 @@ for f in __e2e__/flows/*.yml __e2e__/flows/report-dialog/*.yml; do
   esac
 done
 
+# Waits until Metro has served the app's own bundles (the app's `index.ts`
+# request differs from the pre-warm URL and is built again: 298 s on the iOS
+# smoke run, inside the first tests), at most $1 seconds.
+wait_for_app_bundles() {
+  local limit="$1" i
+  for ((i = 0; i < limit; i += 5)); do
+    # pre-warm + the app's full bundle + its two follow-up requests (smoke
+    # runs: 4 `Bundled ... index.ts` lines before the app's first log line)
+    [ "$(grep -cE 'Bundled [0-9]+ms index\.ts' "$OUT/metro.log")" -ge 4 ] && return 0
+    sleep 5
+  done
+  echo "warm launch: the app's bundles were not all served within ${limit}s" >&2
+}
+
 if [ "$PLATFORM" = android ]; then
   DEVICE=emulator-5554
   export E2E_ANDROID_DEVICE=$DEVICE
@@ -47,7 +61,8 @@ if [ "$PLATFORM" = android ]; then
   # ...and load the app's bundle from Metro once.
   adb -s "$DEVICE" shell am start -a android.intent.action.VIEW \
     -d "exp+bluesky://expo-development-client/?url=http%3A%2F%2Flocalhost%3A8081" "$APP" || true
-  sleep 40
+  wait_for_app_bundles 900
+  sleep 15
   adb -s "$DEVICE" shell am force-stop "$APP"
   echo "warm_launch_s=$(since "$t")" >> "$OUT/steps.txt"
   device="emulator api34 google_apis x86_64 pixel_6 720x1600@280"
@@ -57,6 +72,14 @@ if [ "$PLATFORM" = android ]; then
 else
   DEVICE=$(cat "$OUT/udid.txt")
   export E2E_IOS_DEVICE=$DEVICE
+  # Warm launch pointed at Metro (the launch argument e2e.config.ts uses), so
+  # the app's own bundles are built before the timed suite, as on Android.
+  t=$(now)
+  xcrun simctl launch "$DEVICE" "$APP" --initialUrl http://localhost:8081 || true
+  wait_for_app_bundles 900
+  sleep 15
+  xcrun simctl terminate "$DEVICE" "$APP" || true
+  echo "warm_launch_s=$(since "$t")" >> "$OUT/steps.txt"
   device="$(cat "$OUT/device.txt"); $(xcodebuild -version | head -n 1)"
 fi
 
