@@ -113,6 +113,64 @@ export async function signIn(
   await expect(loggedIn).toBeVisible()
 }
 
+/**
+ * Answer the deep-link handoff the way iOS wants it answered, immediately after
+ * THIS SUITE opened the link, without reading the accessibility tree first.
+ *
+ * `dismissBlockingPrompt` finds the same dialog by locator, and that works - GHA run
+ * 39840373292 traces show `tap getByRole("button", "Open") ✓` recovering a `login`
+ * that had never got past the launcher on CI before. What it cannot do is answer a
+ * prompt on a host that will not give it a tree to look at, and that is a real
+ * failure mode here: run 39840373292 job 3 died in `beforeEach` with
+ * `snapshot failed: app 'xyz.blueskyweb.app' is not running … if a system prompt
+ * such as a deep-link confirmation holds its launch, answer it with alert accept`.
+ * The engine is describing this exact situation and naming the call that survives
+ * it: `device.alert` is a direct native command, not a read of the tree that just
+ * failed.
+ *
+ * WHY CALLING `accept` BLINDLY IS ACCEPTABLE HERE, which it would not be generally.
+ * It runs in the ~5 s window after our own `openLink`, where the only dialog iOS
+ * raises is the handoff one (that is what the 8-of-8-vs-0-of-86 count in FINDING 7
+ * established). If some other prompt were up instead, the only candidate is the
+ * photo-library one, and accepting it grants exactly what the target already asks
+ * for (`app.permissions` includes photos; the Maestro arm auto-confirms every
+ * prompt via `launchApp permissions: all` and passes with that grant). Accepting is
+ * therefore the intended outcome for every alert that can be up in this window;
+ * there is no alert here whose "Cancel" the suite wants.
+ *
+ * It is un-throttled by design, unlike the locator probe, because it costs no
+ * snapshot: one native command, at most once per launch (the caller's `opened` flag
+ * admits one `openLink` per launch). Its one honest cost: the call takes the
+ * daemon's own timeout when the daemon is the thing that is wedged, so on a host
+ * already failing this way it can add tens of seconds to a launch. That is accepted
+ * for the same reason `openLink` itself is - the alternative is a 180 s wait on a
+ * screen the test cannot act on, and it only happens on runs that were going to fail.
+ *
+ * Two outcomes are logged SEPARATELY, and that is the whole point of the shape.
+ * Whether `device.alert('accept')` throws or returns quietly when no alert is up is
+ * a detail of the current daemon that this file must not depend on, so it is never
+ * reported as a success on the strength of the call returning. A prompt we could
+ * SEE is reported as seen-and-tapped by the locator path in `dismissBlockingPrompt`;
+ * this blind call reports only that it was ATTEMPTED, which stays true and countable
+ * whichever way the daemon behaves. A run whose counters show blind attempts but no
+ * seen prompts is telling us the tree is unreadable, not that prompts were cleared.
+ */
+async function acceptLaunchHandoff(device: Device): Promise<void> {
+  try {
+    await device.alert('accept')
+    console.log(
+      '[recovery] blind-accepted the launch prompt after opening the Metro link',
+    )
+  } catch {
+    // The daemon refused: most likely no alert is up (the normal case on iOS 26.2,
+    // where the handoff is auto-confirmed or never raised). The caller's own wait is
+    // what decides whether the launch worked, so this is not a failure to report.
+    console.log(
+      '[recovery] blind launch-prompt accept found no prompt to answer',
+    )
+  }
+}
+
 /** The iOS 26 system prompt for full photo-library access, by its button label. */
 const PHOTO_ALERT_ALLOW = 'Allow Full Access'
 
@@ -373,6 +431,11 @@ async function waitForAppScreen(
         `exp+bluesky://expo-development-client/?url=${encodeURIComponent(METRO_URL)}`,
         {app: BUNDLE_ID},
       )
+      // iOS answers the handoff with a modal that removes the app's nodes, and on a
+      // host whose accessibility reads are already timing out there is no tree for
+      // `dismissBlockingPrompt` to find it in. Answer it blind, right here, where it
+      // is the only prompt that can be up.
+      await acceptLaunchHandoff(device)
       opened = true
       continue
     }
@@ -428,6 +491,10 @@ export async function openDevClient(
       `exp+bluesky://expo-development-client/?url=${encodeURIComponent(METRO_URL)}`,
       {app: BUNDLE_ID},
     )
+    // Same reasoning as in `waitForAppScreen`: this openLink can raise the handoff,
+    // and it is called from the middle of a test (`following-restore`'s relaunch),
+    // where an unanswered modal blocks whatever step comes next.
+    if (platform === 'ios') await acceptLaunchHandoff(device)
   }
 }
 
@@ -519,6 +586,55 @@ export async function tapAtRest(locator: Locator, options?: {tries?: number}) {
  */
 export async function tapCtrl(screen: Screen, testId: string) {
   await screen.getByTestId(testId).tap({position: {x: 0, y: 0}})
+}
+
+/**
+ * Tap a control, sending the keyboard away first if - and only if - the engine
+ * says the keyboard is why it will not tap.
+ *
+ * A PARITY DEVIATION, not a test improvement, and it has to be one. `login.yml`
+ * hides the keyboard on Android only, and the port mirrors that (`login.e2e.ts`
+ * still does). On iOS the two arms then differ because of the DRIVERS, not the
+ * flows: Maestro's driver taps a control an on-screen keyboard is covering, while
+ * this engine refuses to (`perform tap failed: Ref @e70 is behind the visible
+ * keyboard and cannot be tapped safely`) because a tap that lands on the keyboard
+ * would be dispatched somewhere the test never aimed. GHA run 39840373292 shows the
+ * consequence on the same host, same flows, same app: `login` 5/5 on Maestro, and on
+ * `e2e` it now gets PAST the launcher for the first time (the handoff fix) and dies
+ * one step later, on exactly that refusal, at `selectServiceButton`.
+ *
+ * Reacting to the error is deliberate. The obvious alternative - dismiss the
+ * keyboard unconditionally on iOS - is a drag gesture on the screen
+ * (`surface.dismissKeyboard` falls back to `dismissKeyboardByGesture` on iPhone,
+ * which has no dismiss key), so on a screen with no keyboard up it is a stray swipe
+ * that can scroll the very view the next step reads. Triggering it on the engine's
+ * own complaint means the gesture happens exactly when the alternative was a hard
+ * failure. One retry, no loop: if the keyboard is still in the way after being
+ * dismissed, that is a finding, and the second error is the honest one.
+ */
+export async function tapPastKeyboard(
+  device: Device,
+  platform: string,
+  locator: Locator,
+  label: string,
+) {
+  try {
+    await locator.tap()
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (
+      platform !== 'ios' ||
+      !/behind the visible keyboard/i.test(msg) ||
+      (await locator.count()) === 0
+    ) {
+      throw e
+    }
+    console.log(
+      `[recovery] dismissed the keyboard to tap ${label}: the engine refused while it was up`,
+    )
+    await device.dismissKeyboard()
+    await locator.tap()
+  }
 }
 
 /**
