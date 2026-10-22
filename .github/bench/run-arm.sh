@@ -194,6 +194,13 @@ suite_s=$(since "$t")
   echo "anr_guard=$([ "$PLATFORM" = android ] && echo "${ANR_GUARD:-on}" || echo n/a)"
   echo "anr_events=$(wc -l < "$OUT/anr.log" 2>/dev/null | tr -d ' ' || echo 0)"
   echo "flow_list=${FLOW_LIST:-}"
+  # The harness's privacy setting is part of the measurement, not a footnote: it
+  # is what tells an arm that ran with the first-launch prompts already answered
+  # from one that did not. Both arms get the same value by construction (it is
+  # applied in boot-ios.sh, before either arm exists), so a difference in this
+  # column between the arms of one run would itself be the bug.
+  echo "privacy_grant=${PRIVACY_GRANT:-off}"
+  echo "privacy_readback=$(sed -n 's/^readback: //p' "$OUT/privacy.txt" 2>/dev/null | tail -n 1 | tr '\n' ' ')"
   echo "flows_run=${#FLOWS[@]}"
 } > "$OUT/result.env"
 cat "$OUT/steps.txt" "$OUT/result.env"

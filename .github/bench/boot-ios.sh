@@ -53,4 +53,11 @@ xcrun simctl spawn "$udid" defaults write com.apple.WebUI AutoFillPasswords -int
 xcrun simctl install "$udid" "$app"
 echo "$udid" > out/udid.txt
 echo "$device_name $runtime_name" > out/device.txt
+# First-launch permission prompts, answered before the app can ask (see the
+# header of privacy-ios.sh for why this is device prep and not a test step). It
+# runs for PRIVACY_GRANT=off too, so the control writes the same TCC read-back
+# and "the alert appeared with no grant present" stays a measurable claim.
+# It runs after `install` and before the harness's warm launch, which is the
+# first launch of the app's life on this simulator.
+bash "$(dirname "${BASH_SOURCE[0]}")/privacy-ios.sh" "$udid" || true
 echo "Using $device_name on $runtime_name ($udid)"

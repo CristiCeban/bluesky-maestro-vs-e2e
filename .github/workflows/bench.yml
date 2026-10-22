@@ -48,6 +48,15 @@ on:
           are labelled flow_list=<list> and are never pooled with a full-suite
           row.
         default: ''
+      privacy_grant:
+        description: >
+          on = answer the iOS first-launch permission prompts in device prep
+          (`xcrun simctl privacy grant`, see .github/bench/privacy-ios.sh)
+          before the app's first launch. off = leave the simulator's privacy
+          state as a fresh host has it, which is what the published cells ran.
+          Applied once per simulator in boot-ios.sh, so it reaches BOTH arms
+          identically - it is a property of the device, not of a tool.
+        default: 'off'
 
 permissions:
   contents: read
@@ -99,6 +108,7 @@ jobs:
       ANR_GUARD: ${{ inputs.anr_guard }}
       IOS_RUNTIME: ${{ inputs.ios_runtime }}
       FLOW_LIST: ${{ inputs.flow_list }}
+      PRIVACY_GRANT: ${{ inputs.privacy_grant }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
