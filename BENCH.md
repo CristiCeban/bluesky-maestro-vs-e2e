@@ -77,10 +77,29 @@ Arms (both run the same 19 flows, see below):
     `macos-26-xlarge`), Xcode 26.4, an iPhone 17 on iOS 26.5 (or the newest
     iOS 26.x runtime on the image; the result rows record which), password
     AutoFill off.
-  - Device prep (setup, not suite time): Android installs the APK and waits
-    90 s for the fresh emulator's background work, as the 10tap benchmark
-    does; iOS boots, sets AutoFill and installs. Both tools clear the app's
-    state at the start of each test (Maestro `launchApp clearState`).
+  - Device prep (setup, not suite time), the same for both arms:
+    - Android: install the APK, `adb reverse`, the **ANR guard** (below),
+      90 s for the fresh emulator's background work (as the 10tap benchmark),
+      then a warm launch.
+    - iOS: boot, AutoFill off, install, then a warm launch.
+    - **Warm launch**: start the dev client pointed at Metro (Android: the
+      `exp+bluesky://expo-development-client/?url=…` link; iOS:
+      `--initialUrl http://localhost:8081`, the launch argument
+      `e2e.config.ts` uses) and wait until Metro has built the app's own full
+      bundle (max 900 s), then stop the app. Without it, the smoke runs built
+      that bundle inside the first tests (iOS: 298–621 s), because the app's
+      bundle request differs from the pre-warm URL (`warm_launch_s`).
+    - Both tools clear the app's state at the start of each test (Maestro
+      `launchApp clearState`), so the warm launch leaves nothing behind.
+  - **ANR guard** (Android, input `anr_guard`, default `on`; copied from the
+    10tap benchmark): on these runners the emulator's launcher ANRs ("Pixel
+    Launcher isn't responding") and its dialog, or the launcher itself, takes
+    over the screen; in the first full Android run (no guard) 2 of 5 `e2e`
+    runs lost all 19 tests to taps landing on the launcher. The guard disables
+    `com.google.android.apps.nexuslauncher` (the tests never use it) and a
+    3-second watcher force-stops any other app that shows an "Application Not
+    Responding" window, logging it to `anr.log`. `result.env` and `bench.csv`
+    record `anr_guard` and `anr_events`.
 - **Flow set**: the 19 stable flows, i.e. `__e2e__/flows/**` minus
   `thread-muting`, `create-account` and `profile-screen-edit` (red in
   upstream's nightly at the pinned commit). No flow is platform-gated.
