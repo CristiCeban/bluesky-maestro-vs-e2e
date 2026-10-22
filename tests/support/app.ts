@@ -322,7 +322,12 @@ async function waitForAppScreen(
     if (Date.now() >= deadline) break
     await new Promise(r => setTimeout(r, 250))
   }
-  await expect(appScreen).toBeVisible({timeout})
+  // The loop above already spent the budget, so this is the REPORTING read, not
+  // a second wait: an unqualified `toBeVisible({timeout})` here would double the
+  // latency of a genuinely broken launch to 180 s + 180 s per test. 5 s keeps the
+  // failure message (`expected: visible, observed: …`) that the published line
+  // produced while adding 5 s, not 3 min, to a dead host.
+  await expect(appScreen).toBeVisible({timeout: 5_000})
 }
 
 /**
