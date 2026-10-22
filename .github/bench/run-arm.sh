@@ -29,9 +29,9 @@ done
 wait_for_app_bundles() {
   local limit="$1" i
   for ((i = 0; i < limit; i += 5)); do
-    # pre-warm + the app's full bundle + its two follow-up requests (smoke
-    # runs: 4 `Bundled ... index.ts` lines before the app's first log line)
-    [ "$(grep -cE 'Bundled [0-9]+ms index\.ts' "$OUT/metro.log")" -ge 4 ] && return 0
+    # the pre-warm bundle + the app's own full bundle (thousands of modules;
+    # the later 1-module lines are per-launch follow-ups)
+    [ "$(grep -cE 'Bundled [0-9]+ms index\.ts \([0-9]{4,} modules\)' "$OUT/metro.log")" -ge 2 ] && return 0
     sleep 5
   done
   echo "warm launch: the app's bundles were not all served within ${limit}s" >&2
@@ -44,6 +44,27 @@ if [ "$PLATFORM" = android ]; then
   adb -s "$DEVICE" shell settings put global hide_error_dialogs 1
   adb -s "$DEVICE" install -r app/bluesky-e2e.apk
   echo "install_s=$(since "$t")" >> "$OUT/steps.txt"
+  # ANR guard (as the 10tap benchmark), the same for both arms: on these
+  # runners the emulator's launcher ("Pixel Launcher isn't responding") ANRs
+  # and its system dialog covers the app; in the first full Android run, 2 of
+  # 5 e2e runs lost all 19 tests to taps landing on the launcher. The tests
+  # never use the launcher, so disable it, and close any other app's ANR
+  # dialog that still shows. Workflow input anr_guard (default on).
+  if [ "${ANR_GUARD:-on}" = on ]; then
+    adb -s "$DEVICE" shell pm disable-user --user 0 com.google.android.apps.nexuslauncher || true
+    (
+      while sleep 3; do
+        anr=$(adb -s "$DEVICE" shell dumpsys window windows 2>/dev/null | tr -d '\r' |
+          grep -o 'Application Not Responding: [A-Za-z0-9._]*' | head -n 1 | sed 's/.*: //')
+        if [ -n "$anr" ] && [ "$anr" != "$APP" ]; then
+          echo "$(date -u +%T) $anr" >> "$OUT/anr.log"
+          adb -s "$DEVICE" shell am force-stop "$anr" || true
+        fi
+      done
+    ) &
+    ANR_PID=$!
+    trap 'kill "$ANR_PID" 2>/dev/null' EXIT
+  fi
   # Upstream's nightly: the app reaches the PDS and Metro on the host's
   # localhost. (The fixture POSTs to :1986 run on the host.)
   adb -s "$DEVICE" reverse tcp:3000 tcp:3000
@@ -133,6 +154,8 @@ suite_s=$(since "$t")
   echo "runner=${ImageOS:-}/${ImageVersion:-}"
   echo "app_sha256=$(cut -d' ' -f1 app/*.sha256)"
   echo "commit=${GITHUB_SHA:-}"
+  echo "anr_guard=$([ "$PLATFORM" = android ] && echo "${ANR_GUARD:-on}" || echo n/a)"
+  echo "anr_events=$(wc -l < "$OUT/anr.log" 2>/dev/null | tr -d ' ' || echo 0)"
 } > "$OUT/result.env"
 cat "$OUT/steps.txt" "$OUT/result.env"
 tail -n 80 "$OUT/stdout.log"

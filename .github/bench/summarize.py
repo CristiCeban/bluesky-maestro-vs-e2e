@@ -124,6 +124,7 @@ for r in runs:
         'backend_s': r.get('backend_s'), 'metro_prewarm_s': r.get('metro_prewarm_s'),
         'versions': r.get('versions'), 'device': r.get('device'), 'runner': r.get('runner'),
         'app_sha256': r.get('app_sha256'), 'commit': r.get('commit'),
+        'warm_launch_s': r.get('warm_launch_s'), 'anr_guard': r.get('anr_guard'), 'anr_events': r.get('anr_events'),
         'failed_tests': '; '.join(sorted(n for n, v in t.items() if v[1] == 'failed')),
         'failures': ' | '.join(f"{n}: {v[2]}" for n, v in sorted(t.items()) if v[1] == 'failed'),
         'per_test_s': ';'.join(f"{n}={v[0]:.1f}{'' if v[1] == 'passed' else '!'}" for n, v in sorted(t.items())),
