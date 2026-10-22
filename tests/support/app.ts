@@ -121,9 +121,10 @@ export async function signIn(
  * 39840373292 traces show `tap getByRole("button", "Open") ✓` recovering a `login`
  * that had never got past the launcher on CI before. What it cannot do is answer a
  * prompt on a host that will not give it a tree to look at, and that is a real
- * failure mode here: run 39840373292 job 3 died in `beforeEach` with
- * `snapshot failed: app 'xyz.blueskyweb.app' is not running … if a system prompt
- * such as a deep-link confirmation holds its launch, answer it with alert accept`.
+ * failure mode here: two of the three jobs in run 39840373292 died in `beforeEach`
+ * with `snapshot failed: app 'xyz.blueskyweb.app' is not running … if a system
+ * prompt such as a deep-link confirmation holds its launch, answer it with alert
+ * accept`.
  * The engine is describing this exact situation and naming the call that survives
  * it: `device.alert` is a direct native command, not a read of the tree that just
  * failed.
@@ -224,8 +225,9 @@ export async function dismissBlockingPrompt(
   //
   // It is worse than the photo prompt in one way: it is MODAL AND STICKY. The
   // failing runs show it surviving `app.clearState()` onto the NEXT test's
-  // screen - 3 of the 8 tests that died behind it never called `openLink`
-  // themselves - so one unanswered handoff poisons the rest of the suite.
+  // screen - 5 of the 8 tests whose failure screen shows it never called
+  // `openLink` themselves (their traces stop at `app.clearState`) - so one
+  // unanswered handoff poisons the rest of the suite.
   //
   // WHY `appIsReady` IS MANDATORY, not defensive padding. The app itself has
   // menu items whose labels start with "Open in" (`Open in Google Translate`,
@@ -599,9 +601,23 @@ export async function tapCtrl(screen: Screen, testId: string) {
  * this engine refuses to (`perform tap failed: Ref @e70 is behind the visible
  * keyboard and cannot be tapped safely`) because a tap that lands on the keyboard
  * would be dispatched somewhere the test never aimed. GHA run 39840373292 shows the
- * consequence on the same host, same flows, same app: `login` 5/5 on Maestro, and on
- * `e2e` it now gets PAST the launcher for the first time (the handoff fix) and dies
- * one step later, on exactly that refusal, at `selectServiceButton`.
+ * consequence: `login` reached `selectServiceButton` for the first time on CI in that
+ * cell (2 of its 3 jobs died there; the third died in the engine) and failed on
+ * exactly that refusal. In the published cell the flow never got this far at all -
+ * its failures were `e2eOpenLoggedOutView` / `Sign in` never appearing - but that
+ * cell also ran iOS 26.5 rather than 26.2, so how much of the new depth is the
+ * handoff fix and how much is the runtime pin is NOT separated by this data. What it
+ * does show is the step the arm now stops at, which is what this function targets.
+ *
+ * WHAT THIS FIX DOES NOT CLAIM. An earlier draft of this comment said `login` was
+ * "5/5 on Maestro" on the same host, which would have made this the only gap between
+ * the arms. It is not: the published cell's Maestro `login` is 0/5 as well
+ * (`Assertion is false: "Sign in" is visible` twice, `Element not found:
+ * manualSelectBtn` three times, run 39704588488). So `login` is red on CI for BOTH
+ * arms and for two different reasons, and the keyboard parity gap is only the reason
+ * the `e2e` arm now fails at that particular step. The keyboard fix removes one
+ * blocker on this arm; it is not what will make `login` green, and the flow should
+ * not be reported as comparable until both arms' remaining causes are understood.
  *
  * Reacting to the error is deliberate. The obvious alternative - dismiss the
  * keyboard unconditionally on iOS - is a drag gesture on the screen
