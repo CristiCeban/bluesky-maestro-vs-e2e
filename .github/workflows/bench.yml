@@ -26,6 +26,12 @@ on:
       anr_guard:
         description: Android ANR guard (disable the launcher, close other apps' ANR dialogs)
         default: 'on'
+      agent_device:
+        description: >
+          agent-device version for the e2e arm (empty = the locked 0.21.28, i.e. the
+          published arm). Applies to the e2e arm only; the Maestro arm never loads
+          agent-device, so its setup is left exactly as published.
+        default: ''
 
 permissions:
   contents: read
@@ -90,6 +96,9 @@ jobs:
         uses: ./.github/bench/setup
         with:
           dev-env: 'true'
+          # e2e arm only: Maestro does not load agent-device, so passing the version
+          # there would swap a dependency the arm never uses.
+          agent-device-version: ${{ matrix.arm == 'e2e' && inputs.agent_device || '' }}
 
       - name: Download the prebuilt app
         env:

@@ -6,6 +6,14 @@ inputs:
   dev-env:
     description: Also install dev-env (the mock backend)
     default: 'false'
+  agent-device-version:
+    description: >
+      Swap the hoisted agent-device copy for this version after the frozen install
+      (empty = leave the locked 0.21.28, i.e. exactly the published arm). See
+      .github/bench/ad-swap.sh for why this is a directory swap and not a lockfile
+      override: the lockfile must stay byte-identical so agent-device is the ONLY
+      changed variable versus the 0.21.28 rows.
+    default: ''
 runs:
   using: composite
   steps:
@@ -21,6 +29,16 @@ runs:
     - name: Install dependencies
       shell: bash
       run: pnpm install --frozen-lockfile
+
+    # Opt-in engine bump (default off: an empty input leaves the locked 0.21.28 in place,
+    # which is exactly what every published row ran). Runs after the frozen install and
+    # before anything touches the engine, and it verifies that @e2e-dev/mobile still
+    # loads and resolves the swapped copy. run-arm.sh records the resulting version in
+    # tool_versions on every row, so a swapped run can never be mistaken for a locked one.
+    - name: Pin agent-device to the requested version
+      if: inputs.agent-device-version != ''
+      shell: bash
+      run: bash .github/bench/ad-swap.sh "$GITHUB_WORKSPACE" "${{ inputs.agent-device-version }}"
 
     - name: Install dev-env dependencies
       if: inputs.dev-env == 'true'
