@@ -116,17 +116,16 @@ export async function signIn(
 /** The iOS 26 system prompt for full photo-library access, by its button label. */
 const PHOTO_ALERT_ALLOW = 'Allow Full Access'
 
+/** What `dismissBlockingPrompt` removed, so callers can log/count each kind. */
+export type BlockedBy = 'photo-library' | 'open-in-app'
+
 /** How often the prompt may be probed, anywhere in the suite, in ms. */
 const PROMPT_PROBE_MS = 2_000
 let nextPromptProbe = 0
 
 /**
- * One look at the iOS photo-library prompt, tapped away if it is up.
- * See `setupApp` for why this runs on every launch rather than only in the
- * flows that reach media. `device.alert` cannot reach this one (gap 2: it does
- * not see the "Allow Full Access" button), so it is tapped by its label.
- * Returns whether a prompt was dismissed - callers log it so the recovery's
- * firing rate stays countable per run.
+ * One look at a BLOCKING iOS system prompt, tapped away if it is up. Returns
+ * which prompt it dismissed, or false when it saw nothing to do.
  *
  * IT THROTTLES ITSELF, AND IT HAS TO. One `isVisible()` is one snapshot round
  * trip through the engine, and every caller here sits in a poll loop; probing
@@ -135,20 +134,73 @@ let nextPromptProbe = 0
  * suite-wide, and every other call is free. A prompt is up for as long as
  * nobody taps it, so a 2 s look costs at most 2 s of recovery, against the
  * 25 failures one unanswered prompt caused in the published CI run.
+ *
+ * `appIsReady` is the caller's own "is the thing I'm waiting for there yet"
+ * probe, and it is what makes the second branch safe. See below.
  */
-export async function dismissPhotoLibraryPrompt(
+export async function dismissBlockingPrompt(
   screen: Screen,
-): Promise<boolean> {
+  appIsReady: () => Promise<boolean>,
+): Promise<BlockedBy | false> {
   const now = Date.now()
   if (now < nextPromptProbe) return false
   nextPromptProbe = now + PROMPT_PROBE_MS
+
   const allow = screen.getByText(PHOTO_ALERT_ALLOW)
   // The button alone is the trigger: while the alert is up it is a separate
   // window that removes the app's own nodes, so matching on the app or on the
   // prompt title in addition would only add a way to miss it.
-  if (!(await allow.isVisible())) return false
-  await allow.tap()
-  return true
+  if (await allow.isVisible()) {
+    await allow.tap()
+    return 'photo-library'
+  }
+
+  // THE iOS DEEP-LINK HANDOFF CONFIRMATION: `alert "Open in "Bluesky"??"` with
+  // `button "Cancel"` and `button "Open"`. It appears ONLY as a result of this
+  // suite's own recovery calling `device.openLink` (GHA run 39829436248: 8 of
+  // the 8 failures in it, and 0 occurrences across all 86 failures of the two
+  // published runs on either engine), because iOS asks the user before handing a
+  // `exp+bluesky://` link to the app. Maestro does not see it because its
+  // `launchApp permissions: all` auto-confirms prompts, the same parity gap the
+  // photo-library prompt is.
+  //
+  // It is worse than the photo prompt in one way: it is MODAL AND STICKY. The
+  // failing runs show it surviving `app.clearState()` onto the NEXT test's
+  // screen - 3 of the 8 tests that died behind it never called `openLink`
+  // themselves - so one unanswered handoff poisons the rest of the suite.
+  //
+  // WHY `appIsReady` IS MANDATORY, not defensive padding. The app itself has
+  // menu items whose labels start with "Open in" (`Open in Google Translate`,
+  // PostMenuItems.tsx:572), and a test frozen mid-tap on a post menu would look
+  // superficially similar: interesting button, no confirmation yet. Tapping
+  // Google Translate would be an app action, launched by the test harness, in a
+  // flow that never asked for it - the exact class of thing this file must not
+  // do. So the handoff is confirmed only when (a) the node really is an `alert`
+  // - a system alert, not the app's own row, which is a cell - AND (b) the
+  // button is named exactly "Open", not merely containing it, AND (c) the
+  // caller's own probe says the app has NOT presented what it was waiting for.
+  // In that state there is nothing else the test can act on, so confirming the
+  // handoff strictly beats waiting 180 s for a dialog that never closes itself.
+  const handoff = screen.getByRole('alert')
+  if ((await handoff.count()) === 0) return false
+  if (await appIsReady()) return false
+  const open = screen.getByRole('button', 'Open')
+  if ((await open.count()) === 0) return false
+  await open.first().tap()
+  return 'open-in-app'
+}
+
+/**
+ * The photo-library prompt on its own, for callers that have no readiness probe
+ * to offer. `waitForPastPrompts` and `openDevClient` use `dismissBlockingPrompt`
+ * directly so they also clear the deep-link handoff.
+ */
+export async function dismissPhotoLibraryPrompt(
+  screen: Screen,
+): Promise<boolean> {
+  return (
+    (await dismissBlockingPrompt(screen, async () => true)) === 'photo-library'
+  )
 }
 
 /**
@@ -182,9 +234,14 @@ export async function waitForPastPrompts(
   const deadline = Date.now() + timeout
   for (;;) {
     if (await probe()) return true
-    if (await dismissPhotoLibraryPrompt(screen)) {
+    // `probe` doubles as the readiness check rather than `async () => false`:
+    // one more read is what tells "the app has what I need, carry on" apart from
+    // "something is on top of it", and `dismissBlockingPrompt` refuses to confirm
+    // a deep-link handoff while the former is true.
+    const blocked = await dismissBlockingPrompt(screen, probe)
+    if (blocked) {
       console.log(
-        '[recovery] dismissed the iOS photo-library prompt while waiting for a locator',
+        `[recovery] dismissed the ${blocked} prompt while waiting for a locator`,
       )
       continue
     }
@@ -347,12 +404,21 @@ export async function openDevClient(
   await expect
     .poll(
       async () => {
-        if (platform === 'ios' && (await dismissPhotoLibraryPrompt(screen))) {
-          console.log(
-            '[recovery] dismissed the iOS photo-library prompt in openDevClient',
+        const ready =
+          (await launcher.isVisible()) || (await appScreen.isVisible())
+        if (platform === 'ios' && !ready) {
+          const blocked = await dismissBlockingPrompt(
+            screen,
+            async () =>
+              (await launcher.isVisible()) || (await appScreen.isVisible()),
           )
+          if (blocked) {
+            console.log(
+              `[recovery] dismissed the ${blocked} prompt in openDevClient`,
+            )
+          }
         }
-        return (await launcher.isVisible()) || (await appScreen.isVisible())
+        return ready
       },
       {timeout: 60_000},
     )
