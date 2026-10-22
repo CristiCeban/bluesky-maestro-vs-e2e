@@ -597,10 +597,20 @@ export async function tapCtrl(screen: Screen, testId: string) {
  * A PARITY DEVIATION, not a test improvement, and it has to be one. `login.yml`
  * hides the keyboard on Android only, and the port mirrors that (`login.e2e.ts`
  * still does). On iOS the two arms then differ because of the DRIVERS, not the
- * flows: Maestro's driver taps a control an on-screen keyboard is covering, while
- * this engine refuses to (`perform tap failed: Ref @e70 is behind the visible
- * keyboard and cannot be tapped safely`) because a tap that lands on the keyboard
- * would be dispatched somewhere the test never aimed. GHA run 39840373292 shows the
+ * flows: at this same tap Maestro's driver reports a step that produced no
+ * navigation (its own `out/maestro/login/` artifacts: step 13 `tapOn
+ * selectServiceButton` COMPLETED, step 14 then cannot find `manualSelectBtn`, which
+ * only exists inside the sheet that never opened), while this engine refuses the tap
+ * outright (`perform tap failed: Ref @e70 is behind the visible keyboard and cannot
+ * be tapped safely`) because a tap that lands on the keyboard would be dispatched
+ * somewhere the test never aimed. WHY IT REFUSES, NOT WHY MAESTRO DID NOT: the
+ * engine's stated reason is the keyboard, and this function takes that verdict as
+ * its trigger. Whether the keyboard was geometrically over the button is NOT
+ * established - the published arm's hierarchy at its NEXT step puts the button's
+ * bottom at y557 and the keyboard's top at y566, and geometry after a keyboard
+ * animation can differ from geometry at the tap. So this reacts to a refusal, which
+ * is what it can actually observe, and does not claim to have proven the cause.
+ * GHA run 39840373292 shows the
  * consequence: `login` reached `selectServiceButton` for the first time on CI in that
  * cell (2 of its 3 jobs died there; the third died in the engine) and failed on
  * exactly that refusal. In the published cell the flow never got this far at all -
