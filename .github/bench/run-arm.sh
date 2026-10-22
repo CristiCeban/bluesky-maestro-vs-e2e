@@ -179,6 +179,22 @@ esac
 suite_s=$(since "$t")
 [ -n "${logcat_pid:-}" ] && kill "$logcat_pid" 2>/dev/null
 
+# Privacy state as the suite LEFT it, read after the timed section so it cannot
+# affect the measurement. This is the question the whole arm turns on and it was
+# previously answered by assumption: the port's own comment claims the target's
+# `photos` grant "does not stick across clearState", while the engine re-applies
+# app.permissions on every relaunch. Both can only be true if what does not
+# survive is the ANSWERED PROMPT rather than the row, and the only way to know
+# which of the two the suite actually left behind is to read the sim's TCC table
+# after it. Same command on both arms, so it also proves the arms saw the same
+# privacy state at the end, not just at boot.
+if [ "$PLATFORM" = ios ]; then
+  { echo "-- post-suite readback (${ARM}, after the timed suite)"
+    APP_BUNDLE_ID="$APP" bash "$(dirname "${BASH_SOURCE[0]}")/privacy-ios.sh" \
+      "$(cat "$OUT/udid.txt")" readback 2>/dev/null
+  } >> "$OUT/privacy.txt" || true
+fi
+
 {
   echo "platform=$PLATFORM"
   echo "arm=$ARM"
