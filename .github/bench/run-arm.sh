@@ -15,12 +15,41 @@ since() { awk -v a="$1" -v b="$(now)" 'BEGIN { printf "%.1f", b - a }'; }
 # thread-muting, create-account and profile-screen-edit, which are red in
 # upstream's nightly. The flow files are unmodified; the e2e port has the
 # same 19 as tests/**/*.e2e.ts.
-FLOWS=()
+# FLOW_LIST (workflow input) narrows the suite to named flows for a targeted
+# validation dispatch. It applies to BOTH arms here, so a subset stays the same
+# measurement on both sides; an entry that matches nothing fails the job rather
+# than silently running fewer (or all) flows than asked for.
+ALL_FLOWS=()
 for f in __e2e__/flows/*.yml __e2e__/flows/report-dialog/*.yml; do
   case "$f" in
     *thread-muting*|*create-account*|*profile-screen-edit*) ;;
-    *) FLOWS+=("$f") ;;
+    *) ALL_FLOWS+=("$f") ;;
   esac
+done
+FLOWS=()
+if [ -n "${FLOW_LIST:-}" ]; then
+  for want in $FLOW_LIST; do
+    hit=0
+    for f in "${ALL_FLOWS[@]}"; do
+      case "$(basename "$f" .yml)" in
+        "$want") FLOWS+=("$f"); hit=1 ;;
+      esac
+    done
+    [ "$hit" = 1 ] || { echo "run-arm.sh: flow '$want' matches no flow file" >&2; exit 3; }
+  done
+else
+  FLOWS=("${ALL_FLOWS[@]}")
+fi
+# The same list for the e2e arm, as test files (both arms run the same set).
+TESTS=()
+for f in "${FLOWS[@]}"; do
+  b=$(basename "$f" .yml)
+  case "$f" in
+    *report-dialog*) t="tests/report-dialog/$b.e2e.ts" ;;
+    *) t="tests/$b.e2e.ts" ;;
+  esac
+  [ -f "$t" ] || { echo "run-arm.sh: $f has no e2e port at $t" >&2; exit 3; }
+  TESTS+=("$t")
 done
 
 # Waits until Metro has served the app's own bundles (the app's `index.ts`
@@ -129,10 +158,18 @@ case "$ARM" in
     # CI-mode defaults (retries 1, workers 1) are set explicitly here and in
     # e2e.config.ts.
     env -u CI METRO_URL=http://localhost:8081 "${TIME[@]}" pnpm exec e2e run --target "$PLATFORM" --retries 0 \
-      --reporter list,junit --output "$OUT/e2e" > "$OUT/stdout.log" 2>&1
+      --reporter list,junit --output "$OUT/e2e" "${TESTS[@]}" > "$OUT/stdout.log" 2>&1
     code=$?
     ver() { node -p "JSON.parse(require('fs').readFileSync('node_modules/$1/package.json')).version" 2>/dev/null; }
     versions="e2e=$(ver e2e);@e2e-dev/mobile=$(ver @e2e-dev/mobile);agent-device=$(ver agent-device)"
+    # The port's own recoveries (photo-library prompt, dev-launcher openLink,
+    # re-taps on a tap the app never received) log one line each. They cost
+    # almost nothing on a healthy host and they are what keeps a green suite
+    # honest: a run that is green because it recovered 40 times is a different
+    # result from one that is green because nothing dropped, so the count is a
+    # column, not a footnote. See tests/support/app.ts.
+    echo "recoveries=$(grep -c '\[recovery\]' "$OUT/stdout.log" || true)" >> "$OUT/steps.txt"
+    echo "dropped_taps=$(grep -c '\[recovery\] re-tapped' "$OUT/stdout.log" || true)" >> "$OUT/steps.txt"
     ;;
   *)
     echo "unknown arm: $ARM" >&2
@@ -156,6 +193,8 @@ suite_s=$(since "$t")
   echo "commit=${GITHUB_SHA:-}"
   echo "anr_guard=$([ "$PLATFORM" = android ] && echo "${ANR_GUARD:-on}" || echo n/a)"
   echo "anr_events=$(wc -l < "$OUT/anr.log" 2>/dev/null | tr -d ' ' || echo 0)"
+  echo "flow_list=${FLOW_LIST:-}"
+  echo "flows_run=${#FLOWS[@]}"
 } > "$OUT/result.env"
 cat "$OUT/steps.txt" "$OUT/result.env"
 tail -n 80 "$OUT/stdout.log"

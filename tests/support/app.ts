@@ -17,13 +17,31 @@ type Ctx = {app: App; device: Device; platform: string; screen: Screen}
  */
 export async function setupApp({app, device, platform, screen}: Ctx) {
   await app.clearState()
-  await openDevClient(
-    {device, platform, screen},
-    screen.getByText('Sign in').first(),
-  )
-  await expect(screen.getByText('Sign in').first()).toBeVisible({
-    timeout: 180_000,
-  })
+  const signInScreen = screen.getByText('Sign in').first()
+  // 180 s for the app's own first screen, the budget `setupApp.yml`'s
+  // `extendedWaitUntil` uses - but looked at PROPERLY. The published version of
+  // this line was a blind `expect().toBeVisible({timeout: 180_000})`, and on a
+  // CI host that is a wait on a screen the test can never act on:
+  //  - iOS 26 asks for full photo-library access on the FIRST launch after a
+  //    state reset, whatever the test does (`app.clearState()` drops the
+  //    target's `photos: 'grant'`, which on iOS is TCC state, not app data),
+  //    and the alert is a separate window that REMOVES the app's nodes -
+  //    25 of the `e2e` arm's 86 failures in GHA run 39704588488 have it on
+  //    screen, 15 of 19 in one run, on tests that never touch media. The local
+  //    cell cannot see this: the bench sim already has full access persisted
+  //    and `clearState` does not undo that. Maestro is immune because its
+  //    iOS `launchApp` default is `permissions: all`, which auto-taps system
+  //    prompts (`__e2e__/setupApp.yml`); `allowPhotoLibrary()` only covered the
+  //    two flows that reach media (gap 2).
+  //  - on a starved runner the dev launcher sits on "Searching for development
+  //    servers..." even though the launch arguments carry `--initialUrl`: 7 of
+  //    the same 86 failures plus all 53 of Maestro's "Sign in is visible"
+  //    failures are that screen. Opening the Metro link is what F2 does for
+  //    Maestro on Android; this is the same recovery, both platforms.
+  // Both recoveries are waits, not assertions - nothing is weakened, and a
+  // healthy launch costs one extra 250 ms read and logs nothing. Every firing
+  // logs itself so the host problem stays countable per run.
+  await waitForAppScreen({device, platform, screen}, signInScreen)
   // LOAD-BEARING. This wait looks like a `// EXPERIMENT` and I deleted it as an
   // optimisation, so probe t6 measured what it actually buys: without it, 14 of
   // 18 tests in a suite dropped their sign-in tap (sign-in attempt 2 fired at
@@ -83,32 +101,254 @@ export async function signIn(
   const loggedIn = marker ?? screen.getByTestId('viewHeaderHomeFeedPrefsBtn')
   for (let attempt = 0; attempt < 2; attempt++) {
     await tapCtrl(screen, testId)
-    const deadline = Date.now() + 12_000
-    while (Date.now() < deadline) {
-      if (await loggedIn.isVisible()) return
-      await new Promise(r => setTimeout(r, 250))
-    }
+    // The same 12 s window as before, through `waitVisiblePastPrompts` so an
+    // iOS photo-library prompt that arrives AFTER "Sign in" was already visible
+    // cannot sit over the app for the whole window: GHA run 39704588488 run 1,
+    // `login` - "Sign in" passed at 25.6 s, the alert appeared after it and the
+    // change list reads `removed application "Blue Sky"`.
+    if (await waitVisiblePastPrompts(screen, loggedIn, 12_000)) return
   }
   // Two dropped taps is not a dropped-tap race any more; report it the way the
   // caller would have, rather than returning a session-less screen.
   await expect(loggedIn).toBeVisible()
 }
 
+/** The iOS 26 system prompt for full photo-library access, by its button label. */
+const PHOTO_ALERT_ALLOW = 'Allow Full Access'
+
+/** How often the prompt may be probed, anywhere in the suite, in ms. */
+const PROMPT_PROBE_MS = 2_000
+let nextPromptProbe = 0
+
 /**
- * Points the freshly launched development build at Metro, which CI's Maestro
- * run gets from `launchApp` alone (Metro on the default 8081). On iOS the
- * target's launch arguments carry `--initialUrl`; Android's dev launcher
- * ignores them, so the link opens the server.
+ * One look at the iOS photo-library prompt, tapped away if it is up.
+ * See `setupApp` for why this runs on every launch rather than only in the
+ * flows that reach media. `device.alert` cannot reach this one (gap 2: it does
+ * not see the "Allow Full Access" button), so it is tapped by its label.
+ * Returns whether a prompt was dismissed - callers log it so the recovery's
+ * firing rate stays countable per run.
+ *
+ * IT THROTTLES ITSELF, AND IT HAS TO. One `isVisible()` is one snapshot round
+ * trip through the engine, and every caller here sits in a poll loop; probing
+ * per poll would add a snapshot per poll and buy nothing, in a study whose
+ * subject is speed. So a probe is only performed once per `PROMPT_PROBE_MS`
+ * suite-wide, and every other call is free. A prompt is up for as long as
+ * nobody taps it, so a 2 s look costs at most 2 s of recovery, against the
+ * 25 failures one unanswered prompt caused in the published CI run.
+ */
+export async function dismissPhotoLibraryPrompt(
+  screen: Screen,
+): Promise<boolean> {
+  const now = Date.now()
+  if (now < nextPromptProbe) return false
+  nextPromptProbe = now + PROMPT_PROBE_MS
+  const allow = screen.getByText(PHOTO_ALERT_ALLOW)
+  // The button alone is the trigger: while the alert is up it is a separate
+  // window that removes the app's own nodes, so matching on the app or on the
+  // prompt title in addition would only add a way to miss it.
+  if (!(await allow.isVisible())) return false
+  await allow.tap()
+  return true
+}
+
+/**
+ * Poll a caller-supplied probe until it says yes, dismissing the iOS
+ * photo-library prompt whenever it is in the way, and say whether it ever did.
+ *
+ * `waitFor({state:'visible'})` cannot do this: on iOS the alert is a separate
+ * window that removes the app's nodes from the tree (GHA run 39704588488,
+ * `login` run 1: the alert arrives 25 s AFTER "Sign in" passed, and the change
+ * list reads `removed application "Blue Sky"`), so waiting harder just waits
+ * longer on a screen the test can never act on. A wait, not an assertion - the
+ * caller's `expect()` stays the only check.
+ *
+ * The probe is a predicate rather than a locator because the right question
+ * differs per caller and the wrong question would ADD failures: `isVisible()`
+ * is right for "is the app's first screen up", and wrong for a dialog row that
+ * is mounted but scrolled below the fold, which would read as not-visible and
+ * trigger a re-tap a passing run never needed. `tapUntilConfirmed` therefore
+ * asks for PRESENCE (`count() > 0`), which is the exact condition the observed
+ * failures report - `locator matched no nodes within
+ * getByTestId("report:option:Spam")`, match count 0 - and which the screen dump
+ * confirms is a real state change: the option rows do not exist in the tree
+ * until a category is selected.
+ */
+export async function waitForPastPrompts(
+  screen: Screen,
+  probe: () => Promise<boolean>,
+  timeout: number,
+  pollMs = 250,
+): Promise<boolean> {
+  const deadline = Date.now() + timeout
+  for (;;) {
+    if (await probe()) return true
+    if (await dismissPhotoLibraryPrompt(screen)) {
+      console.log(
+        '[recovery] dismissed the iOS photo-library prompt while waiting for a locator',
+      )
+      continue
+    }
+    const left = deadline - Date.now()
+    if (left <= 0) return false
+    await new Promise(r => setTimeout(r, Math.min(left, pollMs)))
+  }
+}
+
+/** `waitForPastPrompts` asking whether a locator is on screen. */
+export const waitVisiblePastPrompts = (
+  screen: Screen,
+  locator: Locator,
+  timeout: number,
+): Promise<boolean> =>
+  waitForPastPrompts(screen, () => locator.isVisible(), timeout)
+
+/**
+ * `waitForPastPrompts` asking whether a locator is in the tree at all. The poll
+ * is 500 ms, not the 250 ms `signIn` measures with: this is called from
+ * `tapUntilConfirmed` with a small per-attempt budget, and each read is an
+ * engine snapshot on a 3-core host. For scale, the step this replaces polled at
+ * ~200 ms internally for its full 17-30 s ("waitFor gave up after 85 reads in
+ * 17.1s"), so a failing tap here costs fewer reads than it used to, and a
+ * healthy one costs exactly one.
+ */
+export const waitPresentPastPrompts = (
+  screen: Screen,
+  locator: Locator,
+  timeout: number,
+): Promise<boolean> =>
+  waitForPastPrompts(
+    screen,
+    async () => (await locator.count()) > 0,
+    timeout,
+    500,
+  )
+
+/**
+ * Tap something and PROVE the app took it, tapping again if it did not.
+ *
+ * The report-dialog family fails as a silently-dropped tap: the tap command
+ * completes (`tap button "Create report for Misleading" (appeared after 609ms)
+ * (1.2s)`) and the app never advances a single node - `screen: unchanged since
+ * step 6`, then the next locator's 30 s lookup dies on a dialog still on step
+ * 1. Screenshot-proven in `phase4/STATUS-4-v31-local.md`, and the same race the
+ * suite already names for the sign-in tap (E1/F1) and `mod-lists` (gap 8), on a
+ * button that had just appeared.
+ *
+ * "Confirmed" is the state the very next step needs anyway (here: the reason
+ * list that only the category tap can open), so a healthy tap costs ONE extra
+ * read - the confirmation is already on screen - and no timeout is inflated.
+ * Every re-tap logs itself, which keeps the underlying drop countable per run:
+ * `grep -c '\[recovery\] re-tapped' <run>/stdout.log` is the drop rate, so
+ * making the suite green does not hide what the engine did.
+ *
+ * THE RE-TAP MUST NOT BE A SECOND ACTION ON AN APP THAT ALREADY MOVED ON.
+ * A tap that landed SLOWLY also shows no confirmation inside the budget, and by
+ * then the target may be gone (the menu it lived in has closed). Tapping
+ * something that is not there would fail the test outright and turn a
+ * slow-but-correct run into a new red one, so before any re-tap the target is
+ * looked for: when it is gone, this waits out one more budget and returns rather
+ * than tapping. Call sites additionally choose confirmations whose producing
+ * tap is idempotent (selecting the same report category twice is the same
+ * state), and no call site taps a submit/publish control.
+ */
+export async function tapUntilConfirmed(options: {
+  screen: Screen
+  target: Locator
+  confirmed: Locator
+  label: string
+  attempts?: number
+  /** Budget per attempt to see the confirmation before re-tapping. */
+  perAttempt?: number
+}): Promise<void> {
+  const {screen, target, confirmed, label} = options
+  const attempts = options.attempts ?? 3
+  const perAttempt = options.perAttempt ?? 8_000
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (attempt > 1 && (await target.count()) === 0) {
+      console.log(
+        `[recovery] ${label}: target gone before re-tap, waiting once more instead of tapping twice`,
+      )
+      if (await waitPresentPastPrompts(screen, confirmed, perAttempt)) return
+      break
+    }
+    await target.tap()
+    if (await waitPresentPastPrompts(screen, confirmed, perAttempt)) {
+      if (attempt > 1) {
+        console.log(
+          `[recovery] re-tapped ${label} on attempt ${attempt}: the app never received tap ${attempt - 1}`,
+        )
+      }
+      return
+    }
+  }
+  // Out of taps. Report it the way the caller would have, on the confirmation
+  // the app was supposed to reach - not on whatever locator comes next.
+  await expect(confirmed).toBeVisible()
+}
+
+/**
+ * The wait `setupApp` performs for the app's own first screen: the 180 s budget
+ * of `setupApp.yml`'s `extendedWaitUntil`, but with the two recoveries a CI host
+ * needs (see `setupApp`) folded in. Returns when `appScreen` is visible; fails
+ * the way the caller would have if it never is.
+ */
+async function waitForAppScreen(
+  {device, platform, screen}: Omit<Ctx, 'app'>,
+  appScreen: Locator,
+  timeout = 180_000,
+): Promise<void> {
+  const launcher = screen.getByText(/^development servers$/i)
+  const deadline = Date.now() + timeout
+  let opened = false
+  for (;;) {
+    if (await waitVisiblePastPrompts(screen, appScreen, 2_000)) return
+    // The dev launcher never got a Metro answer even though the launch carries
+    // `--initialUrl` (GHA run 39704588488: this screen at 7 `e2e` failures and
+    // at all 53 of Maestro's "Sign in" failures). `openLink` is the same
+    // recovery F2 performs for Maestro on Android. One open per launch: if the
+    // launcher is still up after it, keep waiting out the budget - the launcher
+    // may just be slow, and hammering openLink would not help.
+    if (!opened && (await launcher.isVisible())) {
+      console.log(
+        '[recovery] dev launcher still searching for development servers, opening the Metro link',
+      )
+      await device.openLink(
+        `exp+bluesky://expo-development-client/?url=${encodeURIComponent(METRO_URL)}`,
+        {app: BUNDLE_ID},
+      )
+      opened = true
+      continue
+    }
+    if (Date.now() >= deadline) break
+    await new Promise(r => setTimeout(r, 250))
+  }
+  await expect(appScreen).toBeVisible({timeout})
+}
+
+/**
+ * Points a freshly launched development build at Metro, which CI's Maestro run
+ * gets from `launchApp` alone (Metro on the default 8081). On iOS the target's
+ * launch arguments normally carry `--initialUrl`; Android's dev launcher ignores
+ * them, so the link is the only channel it has. Kept non-throwing on purpose:
+ * `following-restore` calls it after a mid-test relaunch and then asserts the
+ * screen itself. `setupApp` uses `waitForAppScreen`, which is this with the
+ * 180 s budget and the photo-library prompt folded in.
  */
 export async function openDevClient(
   {device, platform, screen}: Omit<Ctx, 'app'>,
   appScreen: Locator,
 ) {
-  if (platform !== 'android') return
   const launcher = screen.getByText(/^development servers$/i)
   await expect
     .poll(
-      async () => (await launcher.isVisible()) || (await appScreen.isVisible()),
+      async () => {
+        if (platform === 'ios' && (await dismissPhotoLibraryPrompt(screen))) {
+          console.log(
+            '[recovery] dismissed the iOS photo-library prompt in openDevClient',
+          )
+        }
+        return (await launcher.isVisible()) || (await appScreen.isVisible())
+      },
       {timeout: 60_000},
     )
     .toBe(true)

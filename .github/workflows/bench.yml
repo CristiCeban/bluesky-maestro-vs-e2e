@@ -32,6 +32,22 @@ on:
           published arm). Applies to the e2e arm only; the Maestro arm never loads
           agent-device, so its setup is left exactly as published.
         default: ''
+      ios_runtime:
+        description: >
+          Full CoreSimulator runtime identifier for the iOS simulator. It is a
+          full identifier, not a version, and there is no fallback: if the image
+          does not have it the job fails instead of quietly measuring a
+          different OS. The published iOS cells drifted to iOS 26.5 because the
+          boot script preferred 26.5 and then "newest 26.x".
+        default: 'com.apple.CoreSimulator.SimRuntime.iOS-26-2'
+      flow_list:
+        description: >
+          Space-separated flow names (e.g. "mod-lists post.default"). Empty =
+          all 19 stable flows, which is what the published cells run. Both arms
+          get the same list, so a subset stays a like-for-like comparison; rows
+          are labelled flow_list=<list> and are never pooled with a full-suite
+          row.
+        default: ''
 
 permissions:
   contents: read
@@ -81,6 +97,8 @@ jobs:
       ARM: ${{ matrix.arm }}
       RUN: ${{ matrix.run }}
       ANR_GUARD: ${{ inputs.anr_guard }}
+      IOS_RUNTIME: ${{ inputs.ios_runtime }}
+      FLOW_LIST: ${{ inputs.flow_list }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5

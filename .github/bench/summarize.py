@@ -128,6 +128,10 @@ for r in runs:
         'failed_tests': '; '.join(sorted(n for n, v in t.items() if v[1] == 'failed')),
         'failures': ' | '.join(f"{n}: {v[2]}" for n, v in sorted(t.items()) if v[1] == 'failed'),
         'per_test_s': ';'.join(f"{n}={v[0]:.1f}{'' if v[1] == 'passed' else '!'}" for n, v in sorted(t.items())),
+        # Appended (never reordered) so readers of the published columns still work.
+        # A subset run is not poolable with a 19-flow row, so its scope travels with it.
+        'flow_list': r.get('flow_list', ''), 'flows_run': r.get('flows_run'),
+        'recoveries': r.get('recoveries', ''), 'dropped_taps': r.get('dropped_taps', ''),
     })
 
 with open(csv_path, 'w', newline='') as f:

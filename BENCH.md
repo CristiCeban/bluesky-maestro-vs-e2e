@@ -74,9 +74,19 @@ Arms (both run the same 19 flows, see below):
     animations off. Upstream runs this on a 32-core larger runner; here it is
     the standard 4-vCPU runner.
   - iOS: `macos-26` (standard arm64 runner; upstream uses the paid
-    `macos-26-xlarge`), Xcode 26.4, an iPhone 17 on iOS 26.5 (or the newest
-    iOS 26.x runtime on the image; the result rows record which), password
-    AutoFill off.
+    `macos-26-xlarge`), Xcode 26.4, an iPhone 17. **The simulator runtime is a
+    workflow input, `ios_runtime`, and defaults to
+    `com.apple.CoreSimulator.SimRuntime.iOS-26-2`; there is no fallback** — if
+    the image does not have it, `boot-ios.sh` prints `xcrun simctl list
+    runtimes` into `out/runtimes.txt` and fails. Earlier runs of this workflow
+    asked for "iOS 26.5, else the newest iOS 26.x" and therefore measured
+    26.5 while the local and 10tap cells measured 26.2, which a result row
+    could not reveal after the fact. The resolved runtime is recorded in every
+    row's `device` column. Password AutoFill off.
+  - **`flow_list`** (input): space-separated flow names to narrow the suite for
+    a validation dispatch; empty = all 19 stable flows. It applies to both arms,
+    so a subset stays a like-for-like comparison, and the row carries
+    `flow_list` and `flows_run` so it is never pooled with a full-suite row.
   - Device prep (setup, not suite time), the same for both arms:
     - Android: install the APK, `adb reverse`, the **ANR guard** (below),
       90 s for the fresh emulator's background work (as the 10tap benchmark),
@@ -103,6 +113,19 @@ Arms (both run the same 19 flows, see below):
 - **Flow set**: the 19 stable flows, i.e. `__e2e__/flows/**` minus
   `thread-muting`, `create-account` and `profile-screen-edit` (red in
   upstream's nightly at the pinned commit). No flow is platform-gated.
+- **`e2e`-arm recoveries** (`tests/support/app.ts`, all logged): on this host
+  the iOS photo-library system prompt appears on the first launch after a state
+  reset and stays over the app for the rest of the suite (25 of the 86 `e2e`
+  failures in run 39704588488), and the dev launcher sits on "Searching for
+  development servers…" when Metro cannot answer discovery (7 more, plus all 53
+  of Maestro's `"Sign in" is visible` failures). The port now dismisses the
+  prompt and opens the Metro link when either is on screen, and taps that need
+  a state change (`tapUntilConfirmed`) re-tap until the app has actually
+  received them. Maestro already had the first two (`launchApp permissions:
+  all`, and fix **F2** in the fixed flow copy), so this brings arm C to the same
+  footing rather than ahead of it. Each recovery logs one `[recovery]` line and
+  `bench.csv` carries `recoveries` and `dropped_taps` per run: a run that is
+  green because it recovered 40 times is not reported as a clean run.
 - **Suite time** is the wall time of the tool's command, driver/engine start
   included (Maestro's driver install, agent-device's runner build on iOS).
 
